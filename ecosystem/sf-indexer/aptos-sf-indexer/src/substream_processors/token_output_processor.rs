@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    counters::LATEST_PROCESSED_VERSION,
     database::{execute_with_better_error, get_chunks, PgDbPool, PgPoolConnection},
     indexer::{
         errors::BlockProcessingError,
@@ -24,7 +23,7 @@ use crate::{
     schema,
 };
 use anyhow::format_err;
-use aptos_protos::block_output::v1::BlockOutput;
+use aptos_protos::token_output::v1::Tokens;
 use async_trait::async_trait;
 use diesel::ExpressionMethods;
 use diesel::{pg::upsert::excluded, result::Error};
@@ -32,12 +31,12 @@ use field_count::FieldCount;
 use prost::Message;
 use std::fmt::Debug;
 
-pub struct BlockOutputSubstreamProcessor {
+pub struct TokenOutputSubstreamProcessor {
     connection_pool: PgDbPool,
     is_chain_id_verified: bool,
 }
 
-impl BlockOutputSubstreamProcessor {
+impl TokenOutputSubstreamProcessor {
     pub fn new(connection_pool: PgDbPool) -> Self {
         Self {
             connection_pool,
@@ -46,12 +45,12 @@ impl BlockOutputSubstreamProcessor {
     }
 }
 
-impl Debug for BlockOutputSubstreamProcessor {
+impl Debug for TokenOutputSubstreamProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = &self.connection_pool.state();
         write!(
             f,
-            "BlockOutputSubstreamProcessor {{ connections: {:?}  idle_connections: {:?} }}",
+            "TokenOutputSubstreamProcessor {{ connections: {:?}  idle_connections: {:?} }}",
             state.connections, state.idle_connections
         )
     }
@@ -232,7 +231,6 @@ fn insert_events(conn: &PgPoolConnection, ev: &Vec<EventModel>) {
                     transaction_version.eq(excluded(transaction_version)),
                     transaction_block_height.eq(excluded(transaction_block_height)),
                     type_.eq(excluded(type_)),
-                    type_str.eq(excluded(type_str)),
                     data.eq(excluded(data)),
                     inserted_at.eq(excluded(inserted_at)),
                 )),
@@ -324,7 +322,6 @@ fn insert_move_resources(conn: &PgPoolConnection, wsc_details: &[WriteSetChangeD
                     transaction_block_height.eq(excluded(transaction_block_height)),
                     name.eq(excluded(name)),
                     address.eq(excluded(address)),
-                    type_str.eq(excluded(type_str)),
                     module.eq(excluded(module)),
                     generic_type_params.eq(excluded(generic_type_params)),
                     data.eq(excluded(data)),
@@ -386,7 +383,7 @@ fn insert_table_data(conn: &PgPoolConnection, wsc_details: &[WriteSetChangeDetai
 }
 
 #[async_trait]
-impl SubstreamProcessor for BlockOutputSubstreamProcessor {
+impl SubstreamProcessor for TokenOutputSubstreamProcessor {
     fn substream_module_name(&self) -> &'static str {
         "block_to_block_output"
     }
@@ -412,7 +409,7 @@ impl SubstreamProcessor for BlockOutputSubstreamProcessor {
             ))
         })?;
         // This is the expected output of the substream
-        let block_output: BlockOutput = match output.data.as_ref().unwrap() {
+        let block_output: TokenOutput = match output.data.as_ref().unwrap() {
             ModuleOutputData::MapOutput(data) => {
                 aptos_logger::debug!(block_height = block_height, "Parsing mapper for block");
                 Message::decode(data.value.as_slice()).map_err(|err| {
@@ -445,9 +442,8 @@ impl SubstreamProcessor for BlockOutputSubstreamProcessor {
 
         let (txns, txn_details, events, wscs, wsc_details) =
             TransactionModel::from_transactions(&block_output.transactions);
-        let last_version = txns.last().unwrap().version;
-
         let conn = get_conn(self.connection_pool());
+
         let tx_result = insert_block(
             &conn,
             self.substream_module_name(),
@@ -460,15 +456,10 @@ impl SubstreamProcessor for BlockOutputSubstreamProcessor {
         );
 
         match tx_result {
-            Ok(_) => {
-                LATEST_PROCESSED_VERSION
-                    .with_label_values(&[self.substream_module_name()])
-                    .set(last_version);
-                Ok(ProcessingResult::new(
-                    self.substream_module_name(),
-                    block_height,
-                ))
-            }
+            Ok(_) => Ok(ProcessingResult::new(
+                self.substream_module_name(),
+                block_height,
+            )),
             Err(err) => Err(BlockProcessingError::BlockCommitError((
                 anyhow::Error::from(err),
                 block_height,

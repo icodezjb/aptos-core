@@ -153,6 +153,7 @@ table! {
         gas_unit_price -> Numeric,
         timestamp -> Timestamp,
         inserted_at -> Timestamp,
+        entry_function_id_str -> Text,
     }
 }
 

@@ -22,6 +22,7 @@ use clap::Parser;
 use futures::StreamExt;
 use prost::Message;
 use std::{env, sync::Arc};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -46,6 +47,21 @@ struct IndexerArgs {
     /// Set to 0 to disable.
     #[clap(long, default_value_t = 10)]
     emit_every: usize,
+}
+
+enum Processor {
+    BlockToBlockOutput,
+    // TableItemStore,
+}
+
+impl Processor {
+    fn from_string(input_str: &String) -> Self {
+        match input_str.as_str() {
+            "block_to_block_output" => Self::BlockToBlockOutput,
+            // "table_items_store" => Self::TableItemStore,
+            _ => panic!("Module unsupported {}", input_str),
+        }
+    }
 }
 
 #[tokio::main]
@@ -99,13 +115,15 @@ async fn main() -> Result<(), Error> {
     );
 
     let mut block_height = start_block as u64;
-    let mut processor;
-    // TODO: Create an enum w/ all the module options
-    if substream_module_name == "block_to_block_output" {
-        processor = BlockOutputSubstreamProcessor::new(conn_pool.clone());
-    } else {
-        panic!("Module unsupported {}", substream_module_name);
-    }
+    let processor: Arc<Mutex<dyn SubstreamProcessor>> =
+        match Processor::from_string(substream_module_name) {
+            Processor::BlockToBlockOutput => Arc::new(Mutex::new(
+                BlockOutputSubstreamProcessor::new(conn_pool.clone()),
+            )),
+            // Processor::TableItemStore => Arc::new(Mutex::new(TableItemStoreSubstreamProcessor::new(
+            //     conn_pool.clone(),
+            // ))),
+        };
     let start = chrono::Utc::now().naive_utc();
     let mut base: usize = 0;
     loop {
@@ -134,6 +152,8 @@ async fn main() -> Result<(), Error> {
             }
         };
         match processor
+            .lock()
+            .await
             .process_substream_with_status(data, block_height)
             .await
         {
